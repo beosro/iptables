@@ -11,7 +11,7 @@ lan=tun0
 iphome='a.b.c.d'
 iplan='10.e.f.0/24'
 
-ipr='$iphome,$iplan'
+ipr="$iphome,$iplan"
 
 /sbin/iptables-restore << EOF
 *nat
@@ -74,7 +74,7 @@ COMMIT
 #-A TCP -s $ipr -p tcp --dport 22 -i $lan -j ACCEPT
 
 #VPN
--A UDP -s $ipr -p tcp --dport 1194 -j ACCEPT
+-A UDP -s $iphome -p tcp --dport 1194 -j ACCEPT
 
 #HTTP & HTTPS
 -A TCP -p tcp --dport 80 -i $lan -j ACCEPT
