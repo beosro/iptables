@@ -74,7 +74,7 @@ COMMIT
 #-A TCP -s $ipr -p tcp --dport 22 -i $lan -j ACCEPT
 
 #VPN
--A UDP -s $iphome -p tcp --dport 1194 -j ACCEPT
+-A UDP -s $iphome -p udp --dport 1194 -j ACCEPT
 
 #HTTP & HTTPS
 -A TCP -p tcp --dport 80 -i $lan -j ACCEPT
@@ -90,8 +90,8 @@ COMMIT
 -A TCP -p tcp --dport 445 -i $lan -j ACCEPT
 
 #DNS
-#-A TCP -p tcp --dport 53 -j ACCEPT
-#-A UDP -p udp --dport 53 -j ACCEPT
+#-A TCP -p tcp --dport 53 -i $lan -j ACCEPT
+#-A UDP -p udp --dport 53 -i $lan -j ACCEPT
 
 ###############################
 #      FORWARD RULES          #
