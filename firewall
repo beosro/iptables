@@ -1,19 +1,104 @@
+#!/bin/sh
+#rules almost entirely taken from https://wiki.archlinux.org/index.php/simple_stateful_firewall
+
+ipt="/usr/bin/iptables"
+
+wan=eth0
+vpn=tun0
+iphome='a.b.c.d'
+ipvpn='10.e.f.0/24'
+
+ipr='$iphome,$ipvpn'
+
+/sbin/iptables-restore << EOF
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -s $ipvpn -o $wan -j MASQUERADE
+
+#examples port forwarding (note the mathing rules in the INPUT chain)
+#-A PREROUTING -i $wan -p tcp --dport 22 -j DNAT --to 192.168.0.5
+#-A PREROUTING -i $wan -p tcp --dport 8000 -j DNAT --to 192.168.0.6:80
+
+COMMIT 
+
 *filter
 :INPUT DROP [0:0]
 :FORWARD DROP [0:0]
 :OUTPUT ACCEPT [0:0]
 :TCP - [0:0]
 :UDP - [0:0]
+:IN_SSH - [0:0]
+:fw-interfaces - [0:0]
+:fw-open - [0:0]
+
+###############################
+#       INPUT RULES           #
+###############################
+
 -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 -A INPUT -i lo -j ACCEPT
 -A INPUT -m conntrack --ctstate INVALID -j DROP
 -A INPUT -p icmp -m icmp --icmp-type 8 -m conntrack --ctstate NEW -j ACCEPT
+
+-A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j IN_SSH
 -A INPUT -p udp -m conntrack --ctstate NEW -j UDP
 -A INPUT -p tcp --tcp-flags FIN,SYN,RST,ACK SYN -m conntrack --ctstate NEW -j TCP
--A INPUT -p udp -j REJECT --reject-with icmp-port-unreachable
--A INPUT -p tcp -j REJECT --reject-with tcp-reset
--A INPUT -j REJECT --reject-with icmp-proto-unreachable
 
--A TCP -p tcp --dport 22 -j ACCEPT
+#reject nice
+#-A INPUT -p tcp -j REJECT --reject-with tcp-reset
+#-A INPUT -p udp -j REJECT --reject-with icmp-port-unreachable
+#OR better with scan protect
+#SYN
+-I TCP -p tcp -m recent --update --rsource --seconds 60 --name TCP-PORTSCAN -j REJECT --reject-with tcp-reset
+-A INPUT -p tcp -m recent --set --rsource --name TCP-PORTSCAN -j REJECT --reject-with tcp-reset
+#UDP
+-I UDP -p udp -m recent --update --rsource --seconds 60 --name UDP-PORTSCAN -j REJECT --reject-with icmp-port-unreachable
+-A INPUT -p udp -m recent --set --rsource --name UDP-PORTSCAN -j REJECT --reject-with icmp-port-unreachable
+#this needs to be the last rule in the INPUT chain
+-A INPUT -p udp -j REJECT --reject-with icmp-port-unreachable
+
+#SSH connections (allow only one of the 3 below)
+#method 1: SSH from anywhere but with bruteforce protection
+-A IN_SSH -m recent --name sshbf --rttl --rcheck --hitcount 3 --seconds 10 -j DROP
+-A IN_SSH -m recent --name sshbf --rttl --rcheck --hitcount 4 --seconds 1800 -j DROP 
+-A IN_SSH -m recent --name sshbf --set -j ACCEPT
+#method 2: SSH (from known ips)
+#-A TCP -s $ipr -p tcp --dport 22 -j ACCEPT
+#method 3: SSH from vpn only and only from known iplist
+#-A TCP -s $ipr -p tcp --dport 22 -i $vpn -j ACCEPT
+
+#allow incoming vpn connections
+-A UDP -s $ipr -p tcp --dport 1194 -j ACCEPT
+
+#DNS
+#-A TCP -p tcp --dport 53 -j ACCEPT
+#-A UDP -p udp --dport 53 -j ACCEPT
+
+###############################
+#      FORWARD RULES          #
+###############################
+-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A FORWARD -j fw-interfaces
+-A FORWARD -j fw-open
+-A FORWARD -j REJECT --reject-with icmp-host-unreachable
+-P FORWARD DROP
+
+#forward packets coming through the tunnel
+-A fw-interfaces -i $vpn -j ACCEPT
+
+#examples port forwarding
+#-A fw-open -d 192.168.0.5 -p tcp --dport 22 -j ACCEPT
+#-A fw-open -d 192.168.0.6 -p tcp --dport 80 -j ACCEPT
+
+###############################
+#       OUTPUT RULES          #
+###############################
+
+#nothing here since the policy is ALLOW
 
 COMMIT
+
+EOF
