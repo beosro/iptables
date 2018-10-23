@@ -1,14 +1,17 @@
 #!/bin/sh
 #rules almost entirely taken from https://wiki.archlinux.org/index.php/simple_stateful_firewall
 
-ipt="/usr/bin/iptables"
+ipt="/sbin/iptables"
+$ipt -F
+$ipt -t nat -F
+$ipt -X
 
 wan=eth0
-vpn=tun0
+lan=tun0
 iphome='a.b.c.d'
-ipvpn='10.e.f.0/24'
+iplan='10.e.f.0/24'
 
-ipr='$iphome,$ipvpn'
+ipr='$iphome,$iplan'
 
 /sbin/iptables-restore << EOF
 *nat
@@ -16,7 +19,7 @@ ipr='$iphome,$ipvpn'
 :INPUT ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
--A POSTROUTING -s $ipvpn -o $wan -j MASQUERADE
+-A POSTROUTING -s $iplan -o $wan -j MASQUERADE
 
 #examples port forwarding (note the mathing rules in the INPUT chain)
 #-A PREROUTING -i $wan -p tcp --dport 22 -j DNAT --to 192.168.0.5
@@ -67,11 +70,24 @@ COMMIT
 -A IN_SSH -m recent --name sshbf --set -j ACCEPT
 #method 2: SSH (from known ips)
 #-A TCP -s $ipr -p tcp --dport 22 -j ACCEPT
-#method 3: SSH from vpn only and only from known iplist
-#-A TCP -s $ipr -p tcp --dport 22 -i $vpn -j ACCEPT
+#method 3: SSH from lan only and only from known iplist
+#-A TCP -s $ipr -p tcp --dport 22 -i $lan -j ACCEPT
 
-#allow incoming vpn connections
+#VPN
 -A UDP -s $ipr -p tcp --dport 1194 -j ACCEPT
+
+#HTTP & HTTPS
+-A TCP -p tcp --dport 80 -i $lan -j ACCEPT
+-A TCP -p tcp --dport 443 -i $lan -j ACCEPT
+
+#MQTT
+-A TCP -p tcp --dport 1883 -i $lan -j ACCEPT
+-A TCP -p tcp --dport 8883 -i $lan -j ACCEPT
+
+#SAMBA
+-A UDP -p udp --dport 137:138 -i $lan -j ACCEPT
+-A TCP -p tcp --dport 139 -i $lan -j ACCEPT
+-A TCP -p tcp --dport 445 -i $lan -j ACCEPT
 
 #DNS
 #-A TCP -p tcp --dport 53 -j ACCEPT
@@ -84,10 +100,10 @@ COMMIT
 -A FORWARD -j fw-interfaces
 -A FORWARD -j fw-open
 -A FORWARD -j REJECT --reject-with icmp-host-unreachable
--P FORWARD DROP
+#-P FORWARD DROP
 
 #forward packets coming through the tunnel
--A fw-interfaces -i $vpn -j ACCEPT
+-A fw-interfaces -i $lan -j ACCEPT
 
 #examples port forwarding
 #-A fw-open -d 192.168.0.5 -p tcp --dport 22 -j ACCEPT
