@@ -1,118 +1,198 @@
 #!/bin/sh
 #rules almost entirely taken from https://wiki.archlinux.org/index.php/simple_stateful_firewall
 
+##########################################################
+#                         inputs                         #
+##########################################################
+
+# interfaces
+wan=enp1s0
+lan=br0
+vpnout=tun0
+vpnin=tun1
+
+# important ips
+ipvps='a.b.c.d'
+
+# subnets
+iplan='10.1.1.0/24'
+ipvpnin='10.1.0.0/24'
+
+# incoming ports
+sshport='22'
+vpnport='1194'
+
+# open ports
+# -----------------------------
+# |name     |port     |tcp|udp|
+# -----------------------------
+# |DNS      |53       | y | y |
+# |DNS_TLS  |853      | y | - |
+# |DHCP     |67:68    | - | y |
+# |HTTP,(S) |80,443   | y | - |
+# |NTP      |123      | - | y |
+# |SAMBA    |137:138  | - | y |
+# |         |139,445  | y | - |
+# |MQTT     |1883,8883| y | - |
+# |iperf3   |5201     | y | - |
+# |TRANSweb |9091     | y | - |
+# |hanoHD   |10001    | - | y |
+# -----------------------------
+tcports='53,80,139,443,445,853,5201,9091'
+udports='53,123,137,138,10001'
+
+# block access to internet
+blockip='10.1.1.171-10.1.1.190'
+
+# allow packets from these sources
+ipr="$ipvps,$iplan,$ipvpnin"
+
+
+##########################################################
+#                      start fresh                       #
+##########################################################
 ipt="/sbin/iptables"
 $ipt -F
-$ipt -t nat -F
 $ipt -X
+$ipt -t nat -F
+$ipt -t nat -X
+$ipt -P INPUT DROP
+$ipt -P OUTPUT ACCEPT
+$ipt -P FORWARD DROP
 
-wan=eth0
-lan=tun0
-iphome='a.b.c.d'
-iplan='10.e.f.0/24'
-
-ipr="$iphome,$iplan"
 
 /sbin/iptables-restore << EOF
+##########################################################
+#                           nat                          #
+##########################################################
 *nat
 :PREROUTING ACCEPT [0:0]
 :INPUT ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
--A POSTROUTING -s $iplan -o $wan -j MASQUERADE
 
-#examples port forwarding (note the mathing rules in the INPUT chain)
-#-A PREROUTING -i $wan -p tcp --dport 22 -j DNAT --to 192.168.0.5
-#-A PREROUTING -i $wan -p tcp --dport 8000 -j DNAT --to 192.168.0.6:80
+-A POSTROUTING -s $iplan,$ipvpnin -o $wan -j MASQUERADE
+-A POSTROUTING -s $iplan,$ipvpnin -o $vpnout -j MASQUERADE
 
-COMMIT 
+COMMIT
 
+##########################################################
+#                         mangle                         #
+##########################################################
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+#marking packets from $wan
+#-A PREROUTING -m conntrack --ctstate NEW -i $wan -j CONNMARK --set-mark 0x1
+#-A OUTPUT -m connmark --mark 0x1 -j CONNMARK --restore-mark
+
+COMMIT
+
+##########################################################
+#                          filter                        #
+##########################################################
 *filter
 :INPUT DROP [0:0]
 :FORWARD DROP [0:0]
 :OUTPUT ACCEPT [0:0]
-:TCP - [0:0]
-:UDP - [0:0]
+:IN_VPN - [0:0]
 :IN_SSH - [0:0]
+:UDP - [0:0]
+:TCP - [0:0]
+:fw-block - [0:0]
 :fw-interfaces - [0:0]
-:fw-open - [0:0]
+:LOGDROPVPN - [0:0]
+:LOGDROPSSH - [0:0]
+:LOGDROPALL - [0:0]
+:LOGREJECT - [0:0]
 
-###############################
-#       INPUT RULES           #
-###############################
-
+#--------------------- input rules  ----------------------
 -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 -A INPUT -i lo -j ACCEPT
 -A INPUT -m conntrack --ctstate INVALID -j DROP
--A INPUT -p icmp -m icmp --icmp-type 8 -m conntrack --ctstate NEW -j ACCEPT
+# allow any ping from all interfaces except wan
+-A INPUT -p icmp ! -i $wan -j ACCEPT
+#-A INPUT -p icmp -m icmp --icmp-type 8 -m conntrack --ctstate NEW -j ACCEPT
 
--A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j IN_SSH
+#chain common rules
+-A INPUT -p udp --dport $vpnport -m conntrack --ctstate NEW -j IN_VPN
+-A INPUT -p tcp --syn --dport $sshport -m conntrack --ctstate NEW -j IN_SSH
 -A INPUT -p udp -m conntrack --ctstate NEW -j UDP
--A INPUT -p tcp --tcp-flags FIN,SYN,RST,ACK SYN -m conntrack --ctstate NEW -j TCP
+-A INPUT -p tcp --syn -m conntrack --ctstate NEW -j TCP
 
-#reject nice
-#-A INPUT -p tcp -j REJECT --reject-with tcp-reset
+##reject valid packets on closed ports
 #-A INPUT -p udp -j REJECT --reject-with icmp-port-unreachable
-#OR better with scan protect
-#SYN
--I TCP -p tcp -m recent --update --rsource --seconds 60 --name TCP-PORTSCAN -j REJECT --reject-with tcp-reset
--A INPUT -p tcp -m recent --set --rsource --name TCP-PORTSCAN -j REJECT --reject-with tcp-reset
-#UDP
--I UDP -p udp -m recent --update --rsource --seconds 60 --name UDP-PORTSCAN -j REJECT --reject-with icmp-port-unreachable
--A INPUT -p udp -m recent --set --rsource --name UDP-PORTSCAN -j REJECT --reject-with icmp-port-unreachable
-#this needs to be the last rule in the INPUT chain
--A INPUT -p udp -j REJECT --reject-with icmp-port-unreachable
+#-A INPUT -p tcp -j REJECT --reject-with tcp-reset
+##reject with some scan protection
+#-A INPUT -p udp -m recent --set --rsource --name UDP-PORTSCAN -j REJECT --reject-with icmp-port-unreachable
+#-A INPUT -p tcp -m recent --set --rsource --name TCP-PORTSCAN -j REJECT --reject-with tcp-reset
+##this has to be last
+#-A INPUT -p tcp -j LOGREJECT
+#-A INPUT -p udp -j LOGREJECT
+#-A INPUT -j REJECT --reject-with icmp-proto-unreachable
 
-#SSH connections (allow only one of the 3 below)
-#method 1: SSH from anywhere but with bruteforce protection
--A IN_SSH -m recent --name sshbf --rttl --rcheck --hitcount 3 --seconds 10 -j DROP
--A IN_SSH -m recent --name sshbf --rttl --rcheck --hitcount 4 --seconds 1800 -j DROP 
+#DROP with scan protection
+#-A INPUT -p udp -m recent --set --rsource --name UDP-PORTSCAN -j DROP
+#-A INPUT -p tcp -m recent --set --rsource --name TCP-PORTSCAN -j DROP
+#whatever is left is logged
+-A INPUT -p tcp -j LOGDROPALL
+-A INPUT -p udp -j LOGDROPALL
+
+
+# ACCEPT DHCP requests from LAN
+-A UDP -p udp --dport 67:68 -i $lan -j ACCEPT
+
+# ACCEPT incoming VPN connections
+-A IN_VPN -m recent --name vpnbf --rttl --rcheck --hitcount 3 --seconds 10 -j LOGDROPVPN
+-A IN_VPN -m recent --name vpnbf --rttl --rcheck --hitcount 4 --seconds 1800 -j LOGDROPVPN
+-A IN_VPN -m recent --name vpnbf --set -j ACCEPT
+
+# ACCEPT SSH with timer
+-A IN_SSH -m recent --name sshbf --rttl --rcheck --hitcount 3 --seconds 10 -j LOGDROPSSH
+-A IN_SSH -m recent --name sshbf --rttl --rcheck --hitcount 4 --seconds 1800 -j LOGDROPSSH
 -A IN_SSH -m recent --name sshbf --set -j ACCEPT
-#method 2: SSH (from known ips)
-#-A TCP -s $ipr -p tcp --dport 22 -j ACCEPT
-#method 3: SSH from lan only and only from known iplist
-#-A TCP -s $ipr -p tcp --dport 22 -i $lan -j ACCEPT
 
-#VPN
--A UDP -s $iphome -p udp --dport 1194 -j ACCEPT
+#protect against sys scans
+#-I TCP -p tcp -m recent --update --rsource --seconds 60 --name TCP-PORTSCAN -j REJECT --reject-with tcp-reset
+#-I UDP -p udp -m recent --update --rsource --seconds 60 --name UDP-PORTSCAN -j REJECT --reject-with icmp-port-unreachable
+# ACCEPT various incoming connections from LAN and VPN
+-A TCP -p tcp -m multiport --dports $tcports -i $lan -j ACCEPT
+-A TCP -p tcp -m multiport --dports $tcports -i $vpnin -j ACCEPT
+-A UDP -p udp -m multiport --dports $udports -i $lan -j ACCEPT
+-A UDP -p udp -m multiport --dports $udports -i $vpnin -j ACCEPT
 
-#HTTP & HTTPS
--A TCP -p tcp --dport 80 -i $lan -j ACCEPT
--A TCP -p tcp --dport 443 -i $lan -j ACCEPT
+#log REJECT
+#-A LOGREJECT -m limit --limit 7/min --limit-burst 10 -j LOG --log-prefix "REJECT "
+#log DROP VPN
+-A LOGDROPVPN -m limit --limit 7/min --limit-burst 10 -j LOG --log-prefix "DROP VPN: "
+-A LOGDROPVPN -j DROP
+#log DROP
+-A LOGDROPSSH -m limit --limit 7/min --limit-burst 10 -j LOG --log-prefix "DROP SSH: "
+-A LOGDROPSSH -j DROP
+#log DROP
+-A LOGDROPALL -m limit --limit 7/min --limit-burst 10 -j LOG --log-prefix "DROP ALL: "
+-A LOGDROPALL -j DROP
 
-#MQTT
--A TCP -p tcp --dport 1883 -i $lan -j ACCEPT
--A TCP -p tcp --dport 8883 -i $lan -j ACCEPT
 
-#SAMBA
--A UDP -p udp --dport 137:138 -i $lan -j ACCEPT
--A TCP -p tcp --dport 139 -i $lan -j ACCEPT
--A TCP -p tcp --dport 445 -i $lan -j ACCEPT
-
-#DNS
-#-A TCP -p tcp --dport 53 -i $lan -j ACCEPT
-#-A UDP -p udp --dport 53 -i $lan -j ACCEPT
-
-###############################
-#      FORWARD RULES          #
-###############################
+#-------------------  forward rules  ---------------------
 -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A FORWARD -j fw-block
 -A FORWARD -j fw-interfaces
--A FORWARD -j fw-open
--A FORWARD -j REJECT --reject-with icmp-host-unreachable
-#-P FORWARD DROP
+#-A FORWARD -j REJECT --reject-with icmp-host-unreachable
 
-#forward packets coming through the tunnel
 -A fw-interfaces -i $lan -j ACCEPT
+-A fw-interfaces -i $vpnin -j ACCEPT
 
-#examples port forwarding
-#-A fw-open -d 192.168.0.5 -p tcp --dport 22 -j ACCEPT
-#-A fw-open -d 192.168.0.6 -p tcp --dport 80 -j ACCEPT
+-A fw-block -o $vpnout -m iprange --src-range $blockip -j REJECT --reject-with icmp-proto-unreachable
+-A fw-block -i $vpnout -m iprange --dst-range $blockip -j REJECT --reject-with icmp-proto-unreachable
+-A fw-block -o $wan -m iprange --src-range $blockip -j REJECT --reject-with icmp-proto-unreachable
+-A fw-block -i $wan -m iprange --dst-range $blockip -j REJECT --reject-with icmp-proto-unreachable
 
-###############################
-#       OUTPUT RULES          #
-###############################
-
+#--------------------  output rules  ---------------------
 #nothing here since the policy is ALLOW
 
 COMMIT
